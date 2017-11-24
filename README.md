@@ -6,9 +6,9 @@ Before using jekinson, you need to tell it about your Jenkins credentials. You c
 
 The run jenkinson configure to introduce your credentials with:
 
-   jenkinson configure
+    jenkinson configure
 
 You can add different profiles using:
 
-   jenkinson --profile ANOTHER_PROFILE configure
+    jenkinson --profile ANOTHER_PROFILE configure
 
