@@ -12,5 +12,5 @@ You can add different profiles using:
 
     jenkinson --profile ANOTHER_PROFILE configure
 
-After running *configure* , jenkinson will check if [CSRF](https://wiki.jenkins.io/display/JENKINS/CSRF+Protection) is enabled in jenkins. If that's the case it will add jenkins' crumb parameter in order to send POST requests to jenkins.
+After running *configure* , jenkinson will check if [CSRF](https://wiki.jenkins.io/display/JENKINS/CSRF+Protection) is enabled in jenkins. If that's the case it will add jenkins' crumb parameters into the credentials file in order to send POST requests to jenkins.
 
