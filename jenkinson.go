@@ -5,10 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Jeffail/gabs"
-	"github.com/go-ini/ini"
-	"github.com/ryanuber/columnize"
-	"github.com/urfave/cli"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -16,16 +12,23 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Jeffail/gabs"
+	"github.com/go-ini/ini"
+	"github.com/ryanuber/columnize"
+	"github.com/urfave/cli"
 )
 
 var version string
 var cfg_profile = "default"
 
 type Jenkins struct {
-	Host   string
-	Token  string
-	User   string
-	Passwd string
+	Host        string
+	Token       string
+	User        string
+	Passwd      string
+	Crumb       string
+	CrumbHeader string
 }
 
 type JobCollection struct {
@@ -66,9 +69,12 @@ func (jenkins *Jenkins) ListJobs() ([]Job, error) {
 	var job_collection JobCollection
 	//var console_collection []ConsoleJson
 	body, err := ioutil.ReadAll(resp.Body)
+	//fmt.Println(string(body))
+
 	err = json.Unmarshal(body, &job_collection)
 	if err != nil {
-		fmt.Printf("%+v\n", err)
+		//fmt.Printf("error: %#v\n", err)
+		fmt.Printf("error: %+v\n", err)
 		return nil, err
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&job_collection)
@@ -78,9 +84,34 @@ func (jenkins *Jenkins) ListJobs() ([]Job, error) {
 	return job_collection.Jobs, nil
 }
 
+//GetCrumb connects to CrumbIssuer
+func GetCrumb(JenkinsHost string, JenkinsUser string, JenkinsToken string) (string, error) {
+	JenkinsURLCrumbIssuer := JenkinsHost + "/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,\":\",//crumb)"
+	req, err := http.NewRequest("GET", JenkinsURLCrumbIssuer, nil)
+	req.SetBasicAuth(JenkinsUser, JenkinsToken)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	fmt.Println("response Status:", resp.StatusCode)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	//the crumbIssuer is only available if you have enabled "Prevent Cross Site Request Forgery exploits" in the Jenkins configuration.
+	if resp.StatusCode == 404 {
+		return "Jenkins-Crumb:", nil
+	}
+	if resp.StatusCode != 200 {
+		return "", nil
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	return string(body), nil
+}
+
 func (jenkins *Jenkins) BuildJob(job_name string) (string, error) {
 	jenkins_url_build := jenkins.Host + "/job/" + job_name + "/build"
 	req, err := http.NewRequest("POST", jenkins_url_build, nil)
+	req.Header.Set(jenkins.CrumbHeader, jenkins.Crumb)
 	req.SetBasicAuth(jenkins.User, jenkins.Token)
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -152,6 +183,7 @@ func (jenkins *Jenkins) GetJob(url_queue string) (string, error) {
 		panic(err)
 	}
 	req.SetBasicAuth(jenkins.User, jenkins.Token)
+	req.Header.Set(jenkins.CrumbHeader, jenkins.Crumb)
 	client := &http.Client{}
 	timer_chan := time.NewTimer(time.Second * 60).C
 	ticker := time.NewTicker(time.Second * 5)
@@ -194,7 +226,7 @@ func (jenkins *Jenkins) GetJob(url_queue string) (string, error) {
 
 func CmdBuildJob(job_name string) error {
 	var jenkins Jenkins
-	jenkins.Host, jenkins.User, jenkins.Token, _ = CfgGetCredentials(cfg_profile)
+	jenkins.Host, jenkins.User, jenkins.Token, jenkins.CrumbHeader, jenkins.Crumb, _ = CfgGetCredentials(cfg_profile)
 	_, err := jenkins.BuildJob(job_name)
 
 	if err != nil {
@@ -206,7 +238,7 @@ func CmdBuildJob(job_name string) error {
 
 func CmdGetLog(job_name string, job_build string) error {
 	var jenkins Jenkins
-	jenkins.Host, jenkins.User, jenkins.Token, _ = CfgGetCredentials(cfg_profile)
+	jenkins.Host, jenkins.User, jenkins.Token, jenkins.CrumbHeader, jenkins.Crumb, _ = CfgGetCredentials(cfg_profile)
 	err := jenkins.GetLog(job_name, job_build)
 
 	if err != nil {
@@ -218,7 +250,8 @@ func CmdGetLog(job_name string, job_build string) error {
 func CmdListJobs() error {
 	var jenkins Jenkins
 	var status string
-	jenkins.Host, jenkins.User, jenkins.Token, _ = CfgGetCredentials(cfg_profile)
+	jenkins.Host, jenkins.User, jenkins.Token, jenkins.CrumbHeader, jenkins.Crumb, _ = CfgGetCredentials(cfg_profile)
+
 	jobs, err := jenkins.ListJobs()
 
 	if err != nil {
@@ -231,8 +264,10 @@ func CmdListJobs() error {
 		switch jobs[i].Color {
 		case "red":
 			status = "Failed"
-		case "blue":
+		case "blue", "blue_anime":
 			status = "Success"
+		case "notbuilt":
+			status = "Not built"
 		default:
 			status = strings.Title(jobs[i].Color)
 		}
@@ -248,20 +283,27 @@ func CmdConfigure() error {
 	input_host := bufio.NewReader(os.Stdin)
 	fmt.Print("Jenkins Host: ")
 	data_host, _ := input_host.ReadString('\n')
-	jenkins_host := strings.TrimRight(data_host, "\r\n")
+	JenkinsHost := strings.TrimRight(data_host, "\r\n")
 	input_user := bufio.NewReader(os.Stdin)
 	fmt.Print("Jenkins User: ")
 	data_user, _ := input_user.ReadString('\n')
-	jenkins_user := strings.TrimRight(data_user, "\r\n")
+	JenkinsUser := strings.TrimRight(data_user, "\r\n")
 	input_token := bufio.NewReader(os.Stdin)
 	fmt.Print("Jenkins Token: ")
 	data_token, _ := input_token.ReadString('\n')
-	jenkins_token := strings.TrimRight(data_token, "\r\n")
-	CfgSaveCredentials(cfg_profile, jenkins_host, jenkins_user, jenkins_token)
+	JenkinsToken := strings.TrimRight(data_token, "\r\n")
+	//fmt.Print("Jenkins Crumb: ")
+	//data_crumb, _ := input_token.ReadString('\n')
+	//jenkins_crumb := strings.TrimRight(data_crumb, "\r\n")
+	JenkinsCrumb, _ := GetCrumb(JenkinsHost, JenkinsUser, JenkinsToken)
+	JenkinsCrumbHV := strings.Split(JenkinsCrumb, ":")
+	JenkinsCrumbHeader, JenkinsCrumbValue := JenkinsCrumbHV[0], JenkinsCrumbHV[1]
+	CfgSaveCredentials(cfg_profile, JenkinsHost, JenkinsUser, JenkinsToken, JenkinsCrumbHeader, JenkinsCrumbValue)
+
 	return nil
 }
 
-func CfgSaveCredentials(profile string, host string, user string, token string) error {
+func CfgSaveCredentials(profile string, host string, user string, token string, crumbHeader string, crumb string) error {
 
 	cfg, err := ini.Load(cfg_file)
 	if err != nil {
@@ -279,6 +321,9 @@ func CfgSaveCredentials(profile string, host string, user string, token string) 
 	cfg.Section(profile).Key("jenkins_host").SetValue(host)
 	cfg.Section(profile).Key("jenkins_user").SetValue(user)
 	cfg.Section(profile).Key("jenkins_token").SetValue(token)
+	cfg.Section(profile).Key("jenkins_crumb_header").SetValue(crumbHeader)
+	cfg.Section(profile).Key("jenkins_crumb").SetValue(crumb)
+
 	err = cfg.SaveTo(cfg_file)
 	if err != nil {
 		panic(err)
@@ -286,7 +331,7 @@ func CfgSaveCredentials(profile string, host string, user string, token string) 
 	return nil
 }
 
-func CfgGetCredentials(profile string) (string, string, string, error) {
+func CfgGetCredentials(profile string) (string, string, string, string, string, error) {
 	cfg, err := ini.Load(cfg_file)
 	if err != nil {
 		panic(err)
@@ -294,7 +339,9 @@ func CfgGetCredentials(profile string) (string, string, string, error) {
 	host := cfg.Section(profile).Key("jenkins_host").String()
 	user := cfg.Section(profile).Key("jenkins_user").String()
 	token := cfg.Section(profile).Key("jenkins_token").String()
-	return host, user, token, nil
+	crumb := cfg.Section(profile).Key("jenkins_crumb").String()
+	crumb_header := cfg.Section(profile).Key("jenkins_crumb_header").String()
+	return host, user, token, crumb_header, crumb, nil
 
 }
 
@@ -368,6 +415,16 @@ func main() {
 				return nil
 			},
 		},
+		/*{
+			Name:   "crumb",
+			Usage:  "get crumb",
+			Hidden: true,
+			Action: func(c *cli.Context) error {
+				CmdGetCrumb()
+				return nil
+
+			},
+		},*/
 	}
 
 	app.Run(os.Args)
